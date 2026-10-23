@@ -14,7 +14,10 @@ button.g{background:var(--card);color:var(--fg)}
 button.on{outline:3px solid #facc15}
 #st{color:var(--mut);font-size:14px;line-height:1.45}
 .r{display:flex;gap:6px;background:var(--card);border-radius:8px;padding:6px;margin-top:8px;align-items:center}
-.r img{height:90px;max-width:48%;object-fit:contain;border-radius:4px}
+.r img{height:90px;max-width:48%;object-fit:contain;border-radius:4px;cursor:pointer}
+#lb{position:fixed;inset:0;background:rgba(0,0,0,.93);display:none;flex-direction:column;align-items:center;justify-content:center;gap:12px;z-index:9;padding:10px}
+#lb.show{display:flex}
+#lb img{max-width:100%;max-height:78vh;object-fit:contain}
 </style></head><body>
 <div id="box"><video id="v" playsinline muted></video><canvas id="c"></canvas></div>
 <div>
@@ -26,6 +29,7 @@ button.on{outline:3px solid #facc15}
 </div>
 <p id="st">Tap Start camera. Keep the phone fixed on a stand, facing the road.</p>
 <div id="out"></div>
+<div id="lb"><img id="lbi" alt=""><div><button id="lbs">Save image</button><button class="g" id="lbc">Close</button></div></div>
 
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
@@ -183,10 +187,30 @@ function capture(t){
   fx.fillText(now.toLocaleString(),12,Math.round(W/30));
   total++;
   const r=document.createElement('div');r.className='r';
-  r.innerHTML='<img src="'+f.toDataURL('image/jpeg',.88)+'"><img src="'+cr.toDataURL('image/jpeg',.92)+'"><span>#'+total+' '+b.cls+'<br>'+now.toLocaleTimeString()+'</span>';
+  const stamp=now.toISOString().replace(/[:.]/g,'-').slice(0,19);
+  const i1=document.createElement('img');i1.src=f.toDataURL('image/jpeg',.9);i1.dataset.name='wrongway_'+stamp+'_'+total+'_full.jpg';
+  const i2=document.createElement('img');i2.src=cr.toDataURL('image/jpeg',.92);i2.dataset.name='wrongway_'+stamp+'_'+total+'_car.jpg';
+  const sp=document.createElement('span');sp.innerHTML='#'+total+' '+b.cls+'<br>'+now.toLocaleTimeString()+'<br><small>Tap a photo to enlarge and save</small>';
+  r.append(i1,i2,sp);
   const out=$('out');out.prepend(r);
   while(out.children.length>40)out.removeChild(out.lastChild);
   if(navigator.vibrate)navigator.vibrate(200);
   st('Wrong-way vehicles captured: '+total+'. Press and hold an image to save it.');
 }
+
+let lbName='wrongway.jpg';
+$('out').onclick=e=>{
+  if(e.target.tagName!=='IMG')return;
+  $('lbi').src=e.target.src;lbName=e.target.dataset.name||'wrongway.jpg';
+  $('lb').classList.add('show');
+};
+$('lbc').onclick=()=>$('lb').classList.remove('show');
+$('lbs').onclick=async()=>{
+  try{
+    const b=await (await fetch($('lbi').src)).blob();
+    const u=URL.createObjectURL(b),a=document.createElement('a');
+    a.href=u;a.download=lbName;document.body.appendChild(a);a.click();a.remove();
+    setTimeout(()=>URL.revokeObjectURL(u),5000);
+  }catch(e){st('Could not save automatically. Press and hold the enlarged photo and choose Download image.');}
+};
 </script></body></html>
