@@ -1,136 +1,191 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Wrong-way detector</title>
 <style>
-:root{--bg:#fff;--fg:#111;--mut:#666;--card:#eee;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
-@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#111;--fg:#eee;--mut:#999;--card:#222}}
-:root[data-theme="dark"]{--bg:#111;--fg:#eee;--mut:#999;--card:#222}
+:root{--bg:#fff;--fg:#111;--mut:#666;--card:#eee}
+@media (prefers-color-scheme:dark){:root{--bg:#111;--fg:#eee;--mut:#999;--card:#222}}
 body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,sans-serif;padding:10px}
 #box{position:relative;width:100%;background:#000;border-radius:10px;overflow:hidden}
 video,canvas{display:block;width:100%}
 canvas{position:absolute;top:0;left:0;height:100%;touch-action:none}
-button{font-size:16px;padding:12px 16px;border:0;border-radius:8px;background:#2563eb;color:#fff;margin:8px 6px 0 0}
+button{font-size:15px;padding:11px 14px;border:0;border-radius:8px;background:#2563eb;color:#fff;margin:8px 6px 0 0}
 button.g{background:var(--card);color:var(--fg)}
-p,#st{color:var(--mut);font-size:14px;line-height:1.4}
+button.on{outline:3px solid #facc15}
+#st{color:var(--mut);font-size:14px;line-height:1.45}
 .r{display:flex;gap:6px;background:var(--card);border-radius:8px;padding:6px;margin-top:8px;align-items:center}
 .r img{height:90px;max-width:48%;object-fit:contain;border-radius:4px}
 </style></head><body>
 <div id="box"><video id="v" playsinline muted></video><canvas id="c"></canvas></div>
-<button id="go">Start camera</button><button class="g" id="rs">Reset direction</button>
-<p id="st">Tap Start. Then drag your finger on the video along the <b>correct</b> traffic direction.</p>
+<div>
+<button id="go">Start camera</button>
+<button id="mDir" class="g">1. Set direction</button>
+<button id="mRoad" class="g">2. Set road area</button>
+<button id="pz" class="g">Pause</button>
+<button id="rs" class="g">Reset</button>
+</div>
+<p id="st">Tap Start camera. Keep the phone fixed on a stand, facing the road.</p>
 <div id="out"></div>
-<script>
-const W=128,H=96,v=document.getElementById('v'),c=document.getElementById('c'),x=c.getContext('2d');
-const sm=document.createElement('canvas');sm.width=W;sm.height=H;
-const sx=sm.getContext('2d',{willReadFrequently:true});
-let prev=null,tracks=[],nid=1,allowed=null,drag=null,total=0;
-const st=t=>document.getElementById('st').textContent=t;
 
-document.getElementById('go').onclick=async()=>{
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+<script>
+const v=document.getElementById('v'),c=document.getElementById('c'),x=c.getContext('2d');
+const $=id=>document.getElementById(id);
+const st=t=>$('st').textContent=t;
+const VEH=new Set(['car','motorcycle','bus','truck']);
+const HIST=6;
+let model=null,running=false,paused=false,busy=false,lastRun=0,started=false;
+let mode='dir',allowed=null,road=null,drag=null,tracks=[],nid=1,total=0;
+
+$('go').onclick=async()=>{
+  if(started)return;
+  started=true;
   try{
-    const s=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'},audio:false});
+    st('Starting camera…');
+    const s=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment',width:{ideal:1280},height:{ideal:720}},audio:false});
     v.srcObject=s;await v.play();
     c.width=v.videoWidth;c.height=v.videoHeight;
-    st('Drag on the video along the correct traffic direction.');
-    setInterval(tick,100);
-  }catch(e){st('Camera blocked: '+(e&&e.message?e.message:e));}
+    requestAnimationFrame(loop);
+    if(typeof cocoSsd==='undefined'){st('Could not load the detector. Check your internet connection and reload.');return;}
+    st('Loading the vehicle detector… the first time takes 10–20 seconds.');
+    model=await cocoSsd.load({base:'lite_mobilenet_v2'});
+    running=true;
+    setMode('dir');
+  }catch(e){started=false;st('Camera problem: '+(e&&e.message?e.message:e));}
 };
-document.getElementById('rs').onclick=()=>{allowed=null;drag=null;st('Drag on the video along the correct traffic direction.');};
+
+function setMode(m){
+  mode=m;
+  $('mDir').classList.toggle('on',m==='dir');
+  $('mRoad').classList.toggle('on',m==='road');
+  st(m==='dir'
+    ?'Step 1: drag your finger on the video along the CORRECT traffic direction.'
+    :'Step 2: drag a box around the road lanes. Anything outside it is ignored.');
+}
+$('mDir').onclick=()=>setMode('dir');
+$('mRoad').onclick=()=>setMode('road');
+$('pz').onclick=()=>{paused=!paused;$('pz').textContent=paused?'Resume':'Pause';st(paused?'Paused.':'Watching for wrong-way vehicles.');};
+$('rs').onclick=()=>{allowed=null;road=null;tracks=[];drag=null;setMode('dir');};
 
 function pos(e){const r=c.getBoundingClientRect();return[(e.clientX-r.left)*c.width/r.width,(e.clientY-r.top)*c.height/r.height];}
-c.onpointerdown=e=>{drag={a:pos(e),b:pos(e)};allowed=null;};
+c.onpointerdown=e=>{drag={a:pos(e),b:pos(e)};};
 c.onpointermove=e=>{if(drag)drag.b=pos(e);};
 c.onpointerup=()=>{
   if(!drag)return;
-  const dx=drag.b[0]-drag.a[0],dy=drag.b[1]-drag.a[1],d=Math.hypot(dx,dy);
-  if(d>30){allowed={a:drag.a,b:drag.b,ux:dx/d,uy:dy/d};st('Watching. Wrong-way vehicles will be saved below.');}
+  const[ax,ay]=drag.a,[bx,by]=drag.b;
+  if(mode==='dir'){
+    const dx=bx-ax,dy=by-ay,d=Math.hypot(dx,dy);
+    if(d>30){allowed={a:drag.a,b:drag.b,ux:dx/d,uy:dy/d};setMode('road');st('Direction saved. Now drag a box around the road lanes (or skip this and just watch).');}
+  }else{
+    if(Math.abs(bx-ax)>30&&Math.abs(by-ay)>30){
+      road={x0:Math.min(ax,bx),y0:Math.min(ay,by),x1:Math.max(ax,bx),y1:Math.max(ay,by)};
+      st('Watching for wrong-way vehicles. Captures appear below.');
+    }
+  }
   drag=null;
 };
 
-function tick(){
-  if(!v.videoWidth)return;
-  sx.drawImage(v,0,0,W,H);
-  const d=sx.getImageData(0,0,W,H).data,g=new Uint8Array(W*H);
-  for(let i=0;i<W*H;i++)g[i]=(d[i*4]+d[i*4+1]+d[i*4+2])/3;
-  const blobs=[];
-  if(prev){
-    const m=new Uint8Array(W*H);
-    for(let i=0;i<W*H;i++)m[i]=Math.abs(g[i]-prev[i])>28?1:0;
-    for(let i=0;i<W*H;i++){
-      if(m[i]!==1)continue;
-      const stack=[i];m[i]=2;let n=0,sxm=0,sym=0,x0=W,y0=H,x1=0,y1=0;
-      while(stack.length){
-        const p=stack.pop(),px=p%W,py=(p/W)|0;
-        n++;sxm+=px;sym+=py;
-        if(px<x0)x0=px;if(px>x1)x1=px;if(py<y0)y0=py;if(py>y1)y1=py;
-        for(const q of[p-1,p+1,p-W,p+W]){
-          if(q<0||q>=W*H)continue;
-          if((q===p-1&&px===0)||(q===p+1&&px===W-1))continue;
-          if(m[q]===1){m[q]=2;stack.push(q);}
-        }
-      }
-      if(n>=12)blobs.push({cx:sxm/n,cy:sym/n,x0,y0,x1,y1});
-    }
+async function loop(t){
+  requestAnimationFrame(loop);
+  draw();
+  if(!running||paused||busy||t-lastRun<150)return;
+  busy=true;lastRun=t;
+  try{update(await model.detect(v,20,0.4));}catch(e){}
+  busy=false;
+}
+
+function inRoad(px,py){return !road||(px>=road.x0&&px<=road.x1&&py>=road.y0&&py<=road.y1);}
+
+function update(preds){
+  const minArea=c.width*c.height*0.0008;
+  const dets=[];
+  for(const p of preds){
+    if(!VEH.has(p.class))continue;
+    const[bx,by,bw,bh]=p.bbox;
+    if(bw*bh<minArea)continue;
+    const cx=bx+bw/2,cy=by+bh/2;
+    if(!inRoad(cx,cy))continue;
+    dets.push({x:bx,y:by,w:bw,h:bh,cx,cy,cls:p.class});
   }
-  prev=g;
   for(const t of tracks)t.hit=false;
-  for(const b of blobs){
-    let best=null,bd=18;
+  const maxd=c.width*0.15;
+  for(const d of dets){
+    let best=null,bd=maxd;
     for(const t of tracks){
       if(t.hit)continue;
-      const dd=Math.hypot(t.cx-b.cx,t.cy-b.cy);
+      const dd=Math.hypot(t.cx-d.cx,t.cy-d.cy);
       if(dd<bd){bd=dd;best=t;}
     }
-    if(!best){best={id:nid++,hist:[],missed:0,flagged:false};tracks.push(best);}
-    best.hit=true;best.missed=0;best.cx=b.cx;best.cy=b.cy;best.box=b;
-    best.hist.push([b.cx,b.cy]);if(best.hist.length>12)best.hist.shift();
-    if(allowed&&!best.flagged&&best.hist.length>=10){
+    if(!best){best={id:nid++,hist:[],missed:0,flagged:false,bad:0};tracks.push(best);}
+    best.hit=true;best.missed=0;best.box=d;best.cx=d.cx;best.cy=d.cy;
+    best.hist.push([d.cx,d.cy]);if(best.hist.length>HIST)best.hist.shift();
+    if(allowed&&!best.flagged&&best.hist.length>=HIST){
       const f=best.hist[0],l=best.hist[best.hist.length-1];
       const mx=l[0]-f[0],my=l[1]-f[1],md=Math.hypot(mx,my);
-      if(md>14&&(mx*allowed.ux+my*allowed.uy)/md<-0.6){best.flagged=true;capture(best);}
+      if(md>c.width*0.05&&(mx*allowed.ux+my*allowed.uy)/md<-0.6)best.bad++;else best.bad=0;
+      if(best.bad>=2){best.flagged=true;capture(best);}
     }
   }
   for(const t of tracks)if(!t.hit)t.missed++;
-  tracks=tracks.filter(t=>t.missed<=8);
-  draw();
+  tracks=tracks.filter(t=>t.missed<=6);
 }
 
 function draw(){
   x.clearRect(0,0,c.width,c.height);
-  const k=c.width/W;
-  x.lineWidth=3;x.font='bold 18px sans-serif';
+  const lw=Math.max(2,c.width/400),fs=Math.round(c.width/38);
+  x.lineWidth=lw;x.font='bold '+fs+'px sans-serif';
+  if(road){
+    x.setLineDash([12,8]);x.strokeStyle='#22d3ee';
+    x.strokeRect(road.x0,road.y0,road.x1-road.x0,road.y1-road.y0);x.setLineDash([]);
+  }
   for(const t of tracks){
     if(!t.hit)continue;
     const b=t.box;
     x.strokeStyle=t.flagged?'#ef4444':'#22c55e';
-    x.strokeRect(b.x0*k,b.y0*k,(b.x1-b.x0)*k,(b.y1-b.y0)*k);
-    if(t.flagged){x.fillStyle='#ef4444';x.fillText('WRONG WAY',b.x0*k,b.y0*k-6);}
+    x.strokeRect(b.x,b.y,b.w,b.h);
+    if(t.flagged){x.fillStyle='#ef4444';x.fillText('WRONG WAY',b.x,Math.max(fs,b.y-6));}
   }
-  const a=allowed||drag;
-  if(a){
-    const[ax,ay]=a.a,[bx,by]=a.b;
-    x.strokeStyle='#facc15';x.fillStyle='#facc15';x.lineWidth=5;
-    x.beginPath();x.moveTo(ax,ay);x.lineTo(bx,by);x.stroke();
-    const ang=Math.atan2(by-ay,bx-ax);
-    x.beginPath();x.moveTo(bx,by);
-    x.lineTo(bx-24*Math.cos(ang-.4),by-24*Math.sin(ang-.4));
-    x.lineTo(bx-24*Math.cos(ang+.4),by-24*Math.sin(ang+.4));x.fill();
+  if(allowed){arrow(allowed.a,allowed.b);}
+  if(drag){
+    if(mode==='dir')arrow(drag.a,drag.b);
+    else{
+      x.setLineDash([12,8]);x.strokeStyle='#22d3ee';
+      x.strokeRect(drag.a[0],drag.a[1],drag.b[0]-drag.a[0],drag.b[1]-drag.a[1]);x.setLineDash([]);
+    }
   }
 }
 
+function arrow(a,b){
+  const[ax,ay]=a,[bx,by]=b,h=c.width/30;
+  x.strokeStyle='#facc15';x.fillStyle='#facc15';x.lineWidth=Math.max(4,c.width/250);
+  x.beginPath();x.moveTo(ax,ay);x.lineTo(bx,by);x.stroke();
+  const ang=Math.atan2(by-ay,bx-ax);
+  x.beginPath();x.moveTo(bx,by);
+  x.lineTo(bx-h*Math.cos(ang-.4),by-h*Math.sin(ang-.4));
+  x.lineTo(bx-h*Math.cos(ang+.4),by-h*Math.sin(ang+.4));x.fill();
+}
+
 function capture(t){
-  const k=v.videoWidth/W,b=t.box,pad=4;
-  const f=document.createElement('canvas');f.width=v.videoWidth;f.height=v.videoHeight;
-  f.getContext('2d').drawImage(v,0,0);
-  const cx0=Math.max(0,(b.x0-pad)*k),cy0=Math.max(0,(b.y0-pad)*k);
-  const cw=Math.min(f.width-cx0,(b.x1-b.x0+2*pad)*k),ch=Math.min(f.height-cy0,(b.y1-b.y0+2*pad)*k);
-  const cr=document.createElement('canvas');cr.width=cw;cr.height=ch;
-  cr.getContext('2d').drawImage(f,cx0,cy0,cw,ch,0,0,cw,ch);
+  const b=t.box,W=v.videoWidth,H=v.videoHeight;
+  const f=document.createElement('canvas');f.width=W;f.height=H;
+  const fx=f.getContext('2d');fx.drawImage(v,0,0);
+  const px=b.w*0.15,py=b.h*0.15;
+  const sx0=Math.max(0,b.x-px),sy0=Math.max(0,b.y-py);
+  const sw=Math.min(W-sx0,b.w+2*px),sh=Math.min(H-sy0,b.h+2*py);
+  const cr=document.createElement('canvas');cr.width=sw;cr.height=sh;
+  cr.getContext('2d').drawImage(f,sx0,sy0,sw,sh,0,0,sw,sh);
+  const now=new Date();
+  fx.strokeStyle='#ef4444';fx.lineWidth=Math.max(3,W/300);
+  fx.strokeRect(b.x,b.y,b.w,b.h);
+  fx.fillStyle='#fff';fx.font='bold '+Math.round(W/38)+'px sans-serif';
+  fx.shadowColor='#000';fx.shadowBlur=4;
+  fx.fillText(now.toLocaleString(),12,Math.round(W/30));
   total++;
   const r=document.createElement('div');r.className='r';
-  r.innerHTML='<img src="'+f.toDataURL('image/jpeg',.85)+'"><img src="'+cr.toDataURL('image/jpeg',.9)+'"><span>#'+total+'<br>'+new Date().toLocaleTimeString()+'</span>';
-  document.getElementById('out').prepend(r);
+  r.innerHTML='<img src="'+f.toDataURL('image/jpeg',.88)+'"><img src="'+cr.toDataURL('image/jpeg',.92)+'"><span>#'+total+' '+b.cls+'<br>'+now.toLocaleTimeString()+'</span>';
+  const out=$('out');out.prepend(r);
+  while(out.children.length>40)out.removeChild(out.lastChild);
   if(navigator.vibrate)navigator.vibrate(200);
   st('Wrong-way vehicles captured: '+total+'. Press and hold an image to save it.');
 }
