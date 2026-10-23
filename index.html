@@ -40,7 +40,7 @@ const st=t=>$('st').textContent=t;
 const VEH=new Set(['car','motorcycle','bus','truck']);
 const HIST=6;
 let model=null,running=false,paused=false,busy=false,lastRun=0,started=false;
-let mode='dir',allowed=null,road=null,drag=null,tracks=[],nid=1,total=0;
+let mode='dir',allowed=null,road=[],drag=null,dragPt=-1,tracks=[],nid=1,total=0;
 
 $('go').onclick=async()=>{
   if(started)return;
@@ -65,28 +65,41 @@ function setMode(m){
   $('mRoad').classList.toggle('on',m==='road');
   st(m==='dir'
     ?'Step 1: drag your finger on the video along the CORRECT traffic direction.'
-    :'Step 2: drag a box around the road lanes. Anything outside it is ignored.');
+    :'Step 2: tap 4 corners around the road lanes (e.g. near-left, near-right, far-right, far-left). Drag a dot to adjust. Anything outside is ignored.');
 }
 $('mDir').onclick=()=>setMode('dir');
 $('mRoad').onclick=()=>setMode('road');
 $('pz').onclick=()=>{paused=!paused;$('pz').textContent=paused?'Resume':'Pause';st(paused?'Paused.':'Watching for wrong-way vehicles.');};
-$('rs').onclick=()=>{allowed=null;road=null;tracks=[];drag=null;setMode('dir');};
+$('rs').onclick=()=>{allowed=null;road=[];tracks=[];drag=null;setMode('dir');};
 
 function pos(e){const r=c.getBoundingClientRect();return[(e.clientX-r.left)*c.width/r.width,(e.clientY-r.top)*c.height/r.height];}
-c.onpointerdown=e=>{drag={a:pos(e),b:pos(e)};};
-c.onpointermove=e=>{if(drag)drag.b=pos(e);};
+function roadStatus(){
+  if(road.length<4)st('Road area: tap corner '+(road.length+1)+' of 4.');
+  else st('Road area set. Drag a numbered dot to adjust it. Watching for wrong-way vehicles.');
+}
+c.onpointerdown=e=>{
+  const p=pos(e);
+  if(mode==='road'){
+    const R=c.width*0.05;dragPt=-1;
+    for(let i=0;i<road.length;i++)if(Math.hypot(road[i][0]-p[0],road[i][1]-p[1])<R){dragPt=i;break;}
+    if(dragPt<0){
+      if(road.length>=4)road=[];
+      road.push(p);dragPt=road.length-1;roadStatus();
+    }
+    return;
+  }
+  drag={a:p,b:p};
+};
+c.onpointermove=e=>{
+  if(mode==='road'){if(dragPt>=0)road[dragPt]=pos(e);return;}
+  if(drag)drag.b=pos(e);
+};
 c.onpointerup=()=>{
+  if(mode==='road'){dragPt=-1;return;}
   if(!drag)return;
   const[ax,ay]=drag.a,[bx,by]=drag.b;
-  if(mode==='dir'){
-    const dx=bx-ax,dy=by-ay,d=Math.hypot(dx,dy);
-    if(d>30){allowed={a:drag.a,b:drag.b,ux:dx/d,uy:dy/d};setMode('road');st('Direction saved. Now drag a box around the road lanes (or skip this and just watch).');}
-  }else{
-    if(Math.abs(bx-ax)>30&&Math.abs(by-ay)>30){
-      road={x0:Math.min(ax,bx),y0:Math.min(ay,by),x1:Math.max(ax,bx),y1:Math.max(ay,by)};
-      st('Watching for wrong-way vehicles. Captures appear below.');
-    }
-  }
+  const dx=bx-ax,dy=by-ay,d=Math.hypot(dx,dy);
+  if(d>30){allowed={a:drag.a,b:drag.b,ux:dx/d,uy:dy/d};setMode('road');}
   drag=null;
 };
 
@@ -99,7 +112,15 @@ async function loop(t){
   busy=false;
 }
 
-function inRoad(px,py){return !road||(px>=road.x0&&px<=road.x1&&py>=road.y0&&py<=road.y1);}
+function inRoad(px,py){
+  if(road.length<4)return true;
+  let inside=false;
+  for(let i=0,j=3;i<4;j=i++){
+    const xi=road[i][0],yi=road[i][1],xj=road[j][0],yj=road[j][1];
+    if((yi>py)!==(yj>py)&&px<(xj-xi)*(py-yi)/(yj-yi)+xi)inside=!inside;
+  }
+  return inside;
+}
 
 function update(preds){
   const minArea=c.width*c.height*0.0008;
@@ -139,10 +160,7 @@ function draw(){
   x.clearRect(0,0,c.width,c.height);
   const lw=Math.max(2,c.width/400),fs=Math.round(c.width/38);
   x.lineWidth=lw;x.font='bold '+fs+'px sans-serif';
-  if(road){
-    x.setLineDash([12,8]);x.strokeStyle='#22d3ee';
-    x.strokeRect(road.x0,road.y0,road.x1-road.x0,road.y1-road.y0);x.setLineDash([]);
-  }
+  drawRoad();x.lineWidth=lw;x.font='bold '+fs+'px sans-serif';
   for(const t of tracks){
     if(!t.hit)continue;
     const b=t.box;
@@ -151,13 +169,23 @@ function draw(){
     if(t.flagged){x.fillStyle='#ef4444';x.fillText('WRONG WAY',b.x,Math.max(fs,b.y-6));}
   }
   if(allowed){arrow(allowed.a,allowed.b);}
-  if(drag){
-    if(mode==='dir')arrow(drag.a,drag.b);
-    else{
-      x.setLineDash([12,8]);x.strokeStyle='#22d3ee';
-      x.strokeRect(drag.a[0],drag.a[1],drag.b[0]-drag.a[0],drag.b[1]-drag.a[1]);x.setLineDash([]);
-    }
-  }
+  if(drag&&mode==='dir')arrow(drag.a,drag.b);
+}
+
+function drawRoad(){
+  if(!road.length)return;
+  x.lineWidth=Math.max(2,c.width/400);
+  x.strokeStyle='#22d3ee';x.fillStyle='rgba(34,211,238,.15)';
+  x.setLineDash([12,8]);
+  x.beginPath();x.moveTo(road[0][0],road[0][1]);
+  for(let i=1;i<road.length;i++)x.lineTo(road[i][0],road[i][1]);
+  if(road.length===4){x.closePath();x.fill();}
+  x.stroke();x.setLineDash([]);
+  road.forEach((p,i)=>{
+    x.fillStyle='#22d3ee';x.beginPath();x.arc(p[0],p[1],c.width/90,0,7);x.fill();
+    x.fillStyle='#000';x.font='bold '+Math.round(c.width/50)+'px sans-serif';
+    x.fillText(i+1,p[0]-c.width/200,p[1]+c.width/160);
+  });
 }
 
 function arrow(a,b){
