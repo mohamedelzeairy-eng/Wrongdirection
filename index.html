@@ -145,6 +145,10 @@ function update(preds){
     if(!best){best={id:nid++,hist:[],missed:0,flagged:false,bad:0};tracks.push(best);}
     best.hit=true;best.missed=0;best.box=d;best.cx=d.cx;best.cy=d.cy;
     best.hist.push([d.cx,d.cy]);if(best.hist.length>HIST)best.hist.shift();
+    if(best.hist.length>=HIST){
+      const f0=best.hist[0],l0=best.hist[best.hist.length-1];
+      best.moving=Math.hypot(l0[0]-f0[0],l0[1]-f0[1])>Math.max(c.width*0.02,d.w*0.15);
+    }
     if(allowed&&!best.flagged&&best.hist.length>=HIST){
       const f=best.hist[0],l=best.hist[best.hist.length-1];
       const mx=l[0]-f[0],my=l[1]-f[1],md=Math.hypot(mx,my);
@@ -162,7 +166,7 @@ function draw(){
   x.lineWidth=lw;x.font='bold '+fs+'px sans-serif';
   drawRoad();x.lineWidth=lw;x.font='bold '+fs+'px sans-serif';
   for(const t of tracks){
-    if(!t.hit)continue;
+    if(!t.hit||(!t.moving&&!t.flagged))continue;
     const b=t.box;
     x.strokeStyle=t.flagged?'#ef4444':'#22c55e';
     x.strokeRect(b.x,b.y,b.w,b.h);
